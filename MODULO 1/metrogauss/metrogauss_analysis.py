@@ -1,6 +1,5 @@
 import numpy as np
 import matplotlib.pyplot as plt
-from autocorr_time import autocorr_table, tau
 import logging
 
 vals = np.loadtxt("values.txt")
