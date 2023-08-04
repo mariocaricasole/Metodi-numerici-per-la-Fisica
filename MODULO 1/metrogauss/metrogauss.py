@@ -2,8 +2,7 @@ import numpy as np
 
 #define parameters and starting value
 xk = 0
-L=10000
-step = 1
+L=15000
 delta = 0.1
 mu = 5
 sigma = 1
