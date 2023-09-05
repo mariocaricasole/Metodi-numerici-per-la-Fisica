@@ -93,7 +93,7 @@ __global__ void simulation(int dataPoints, double *dBeta, signed char* dMagMarko
 
     //declare useful variables
     int i0, j0;
-    double acceptance;
+    float acceptance;
     signed char force;
     signed char dMag = 0;
     signed char dEnergy = 0;
@@ -107,13 +107,13 @@ __global__ void simulation(int dataPoints, double *dBeta, signed char* dMagMarko
         force = get(lattice,i0-1,j0,L)+ get(lattice,i0+1,j0,L) + get(lattice,i0,j0-1,L) + get(lattice,i0,j0+1,L);
 
         //calculate acceptance
-        acceptance = min(double(1.), exp(-2*get(lattice,i0,j0,L)*force*beta));
+        acceptance = min(float(1.), expf(-2*get(lattice,i0,j0,L)*force*beta));
 
         //accept-reject step
         if(acceptance > curand_uniform(&localState))
         {
-            dEnergy = get(lattice,i0,j0,L)*force;
-            dMag = -get(lattice,i0,j0,L);
+            dEnergy += get(lattice,i0,j0,L)*force;
+            dMag -= get(lattice,i0,j0,L);
             lattice[flatten(i0,j0,L)] = !lattice[flatten(i0,j0,L)];
         }
 
@@ -122,6 +122,8 @@ __global__ void simulation(int dataPoints, double *dBeta, signed char* dMagMarko
         {
             dMagMarkov[idx*dataPoints + i/100] = dMag;
             dEnergyMarkov[idx*dataPoints + i/100] = dEnergy;
+            dMag = 0;
+            dEnergy = 0;
         }
     }
 
@@ -136,19 +138,14 @@ int main()
     //simulation parameters
     const unsigned char L = 4;
     const unsigned char nBeta = 64;
-    const int dataPoints = 4e6;
+    const int dataPoints = 1e5;
     const unsigned long long size = L*nBeta*dataPoints;
 
     //allocate random generators
     curandState *dStates;
     cudaMallocManaged(&dStates, L*nBeta*sizeof(curandState));
 
-    //allocate host memory container for simulation results
-    signed char *hMagMarkov = (signed char*)malloc(size*sizeof(signed char));
-    signed char *hEnergyMarkov = (signed char*)malloc(size*sizeof(signed char));
-    double *hBeta = (double*)malloc(nBeta*sizeof(double));
-
-    //allocate device memory too
+    //allocate unified memory
     double *dBeta;
     signed char *dMagMarkov, *dEnergyMarkov;
     cudaMallocManaged(&dMagMarkov, size*sizeof(signed char));
@@ -166,14 +163,9 @@ int main()
     gpuErrchk( cudaPeekAtLastError() );
     gpuErrchk( cudaDeviceSynchronize() );
 
-    //copy back array to host
-    cudaMemcpy(hMagMarkov, dMagMarkov, size*sizeof(signed char), cudaMemcpyDeviceToHost);
-    cudaMemcpy(hEnergyMarkov, dEnergyMarkov, size*sizeof(signed char), cudaMemcpyDeviceToHost);
-    cudaMemcpy(hBeta, dBeta, nBeta*sizeof(double), cudaMemcpyDeviceToHost);
-
-    //output to file what we got in a TTree
-    TFile file("thermodynamics.root", "recreate");
-    TTree t1("t1", "tree holding first 1e5 data points");
+    //output to file
+    TFile file("data.root", "recreate");
+    TTree t1("t1", "data points");
     signed char currentMarkovMag, currentMarkovEnergy;
 
     t1.Branch("magMarkov", &currentMarkovMag, "magMarkov/B");
@@ -181,8 +173,8 @@ int main()
 
     for(unsigned long long i=0; i < size; i++)
     {
-        currentMarkovEnergy = hEnergyMarkov[i];
-        currentMarkovMag = hMagMarkov[i];
+        currentMarkovEnergy = dEnergyMarkov[i];
+        currentMarkovMag = dMagMarkov[i];
         t1.Fill();
     }
     t1.Write();
@@ -192,11 +184,6 @@ int main()
     cudaFree(dBeta);
     cudaFree(dMagMarkov);
     cudaFree(dEnergyMarkov);
-
-    //free host memory
-    free(hBeta);
-    free(hMagMarkov);
-    free(hEnergyMarkov);
 
     return 0;
 }
