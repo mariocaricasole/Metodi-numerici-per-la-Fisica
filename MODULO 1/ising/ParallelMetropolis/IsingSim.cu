@@ -1,244 +1,99 @@
-#include<cuda_runtime.h>
-#include<curand_kernel.h>
-
-#include<fstream>
-#include<math.h>
-
-#include<TTree.h>
-#include<TFile.h>
-
-#define gpuErrchk(ans) { gpuAssert((ans), __FILE__, __LINE__); }
-inline void gpuAssert(cudaError_t code, const char *file, int line, bool abort=true)
-{
-   if (code != cudaSuccess)
-   {
-      fprintf(stderr,"GPUassert: %s %s %d\n", cudaGetErrorString(code), file, line);
-      if (abort) exit(code);
-   }
-}
-
-
-
-__host__ __device__ int flatten(int i, int j, int L)
-{
-    //periodic boundary conditions
-    int m=i;
-    int n=j;
-
-    if(i<0)
-        m = L-1;
-    else if(i>L-1)
-        m = 0;
-
-    if(j<0)
-        n = L-1;
-    else if(j>L-1)
-        n = 0;
-
-    return m + n*L;
-}
-
-
-
-__device__ double get(bool* lattice, int i, int j, int L)
-{
-    bool value = lattice[flatten(i,j,L)];
-    double res;
-    if(value)
-        res=1.;
-    else
-        res=-1.;
-
-    return res;
-}
-
-
-
-__global__ void initRandom(curandState *states, int seed)
-{
-    unsigned short simIdx = threadIdx.x + blockIdx.x*blockDim.x;
-
-    //initialize random generator on each thread
-    curand_init(seed, simIdx, 0, &states[simIdx]);
-}
-
-
-
-__device__ void randomLatticeSite(curandState *states, int *i0, int *j0){
-
-    unsigned short simIdx = threadIdx.x + blockDim.x*blockIdx.x;
-    unsigned char L = 20 + blockIdx.x*10;
-    curandState localState = states[simIdx];
-
-    *i0 = (int)truncf(L*curand_uniform(&localState));
-    *j0 = (int)truncf(L*curand_uniform(&localState));
-
-    states[simIdx] = localState;
-}
-
-
-
-__global__ void simulation(int dataPoints, double *dBeta, double* dMag, double* dChi, double* dHeat, double* dMagMarkov, double* dEnergyMarkov, curandState* dStates)
-{
-    //get thread index
-    unsigned short idx = threadIdx.x + blockIdx.x*blockDim.x;
-
-    //get simulation parameters and random generator from the thread index
-    double beta = 0.44 + 0.1*pow(2*(double)threadIdx.x/blockDim.x - 1,3);
-    unsigned char L = 20 + blockIdx.x*10;
-    curandState localState = dStates[idx];
-
-    //declare and initialize lattice in private memory, use only booleans to save space (true = 1, false = -1)
-    bool* lattice = (bool*)malloc(L*L*sizeof(bool));
-    for(unsigned short i=0; i<L*L; i++)
-        lattice[i]=true;    //cold state
-
-    //declare useful variables
-    int i0, j0;
-    double acceptance, force;
-    double actualMag = 1.;
-    double actualEnergy = -2.;
-    double avgEnergy=0., avgMag=0., avgEnergySq=0., avgMagSq=0.;
-
-    //run metropolis algorithm
-    for(unsigned long long i=0; i<100*dataPoints; i++)
-    {
-        //take a random site
-        randomLatticeSite(&localState, &i0, &j0);
-        //evaluate "force"
-        force = get(lattice,i0-1,j0,L)+ get(lattice,i0+1,j0,L) + get(lattice,i0,j0-1,L) + get(lattice,i0,j0+1,L);
-
-        //calculate acceptance
-        acceptance = min(double(1.), exp(-2*get(lattice,i0,j0,L)*force*beta));
-
-        //accept-reject step
-        if(acceptance > curand_uniform(&localState))
-        {
-            actualEnergy += 2*get(lattice,i0,j0,L)*force/(L*L);
-            actualMag -= 2*get(lattice,i0,j0,L)/(L*L);
-            lattice[flatten(i0,j0,L)] = !lattice[flatten(i0,j0,L)];
-        }
-
-        //reduce data, extract only the first 10^5
-        if(i%100==0)
-        {
-            if(i/100 < 1e5)
-            {
-                dMagMarkov[idx*100000 + i/100] = actualMag;
-                dEnergyMarkov[idx*100000 + i/100] = actualEnergy;
-            }
-
-            //magnetization quantities
-            avgMag += abs(actualMag);
-            avgMagSq += pow(actualMag,2);
-
-            //energy quantities
-            avgEnergy += actualEnergy;
-            avgEnergySq += pow(actualEnergy,2);
-        }
-    }
-
-    dStates[idx] = localState;
-    dMag[idx] = avgMag/dataPoints;
-    dChi[idx] = L*L*(avgMagSq/dataPoints - pow(avgMag/dataPoints,2));
-    dHeat[idx] = L*L*(avgEnergySq/dataPoints - pow(avgEnergy/dataPoints,2));
-
-    if(blockIdx.x==0)
-        dBeta[threadIdx.x] = beta;
-}
+#include "IsingMethods.h"
+#include <thread>
 
 int main()
 {
+    /************************ PARAMETERS ************************/
     //simulation parameters
     const unsigned char L = 4;
     const unsigned char nBeta = 64;
-    const int dataPoints = 1e6;
+    const int dataPoints = 2e5;
+    const int batchSize = 1e5;
+    const unsigned long long memSize = L*nBeta*batchSize;
 
+    /******************* MEMORY ALLOCATIONS *********************/
     //allocate random generators
     curandState *dStates;
     cudaMallocManaged(&dStates, L*nBeta*sizeof(curandState));
 
-    //allocate host memory container for simulation results
-    double *hMag = (double*)malloc(L*nBeta*sizeof(double));
-    double *hChi = (double*)malloc(L*nBeta*sizeof(double));
-    double *hHeat = (double*)malloc(L*nBeta*sizeof(double));
-    double *hMagMarkov = (double*)malloc(L*nBeta*100000*sizeof(double));
-    double *hEnergyMarkov = (double*)malloc(L*nBeta*100000*sizeof(double));
-    double *hBeta = (double*)malloc(nBeta*sizeof(double));
+    //allocate unified memory
+    double *dBeta;
+    signed char **dMagMarkov;
+    signed short **dEnergyMarkov;
+    bool* dLattices;
 
-    //allocate device memory too
-    double *dMag, *dChi, *dHeat, *dBeta, *dMagMarkov, *dEnergyMarkov;
-    cudaMallocManaged(&dMag, L*nBeta*sizeof(double));
-    cudaMallocManaged(&dChi, L*nBeta*sizeof(double));
-    cudaMallocManaged(&dHeat, L*nBeta*sizeof(double));
-    cudaMallocManaged(&dMagMarkov, L*nBeta*100000*sizeof(double));
-    cudaMallocManaged(&dEnergyMarkov, L*nBeta*100000*sizeof(double));
+    cudaMallocHost(&dMagMarkov, 3*sizeof(signed char*));
+    cudaMallocHost(&dEnergyMarkov, 3*sizeof(signed short*));
+
+    for(int i=0;i<2;i++)
+    {
+        cudaMallocManaged(&dMagMarkov[i], memSize*sizeof(signed char));
+        cudaMallocManaged(&dEnergyMarkov[i], memSize*sizeof(signed short));
+    }
+    cudaMallocHost(&dMagMarkov[2], memSize*sizeof(signed char));
+    cudaMallocHost(&dEnergyMarkov[2], memSize*sizeof(signed short));
     cudaMallocManaged(&dBeta, nBeta*sizeof(double));
+    cudaMallocManaged(&dLattices, 5400*nBeta*sizeof(bool));
 
-    //run simulation kernel
+    /*********************** INITIALIZATIONS ********************/
+    //initialize all lattices to cold state
+    for(unsigned int i=0; i<5400*nBeta; i++)
+        dLattices[i]=true;
+
+    //run random generator initialization kernel
     initRandom<<<L,nBeta>>>(dStates,1221);
 
-    gpuErrchk( cudaPeekAtLastError() );
-    gpuErrchk( cudaDeviceSynchronize() );
+    //create event to signal end of kernel execution
+    cudaEvent_t kernelDone;
+    cudaEventCreate(&kernelDone);
 
-    simulation<<<L,nBeta>>>(dataPoints, dBeta, dMag, dChi, dHeat, dMagMarkov, dEnergyMarkov, dStates);
-
-    gpuErrchk( cudaPeekAtLastError() );
-    gpuErrchk( cudaDeviceSynchronize() );
-
-    //copy back array to host
-    cudaMemcpy(hMag, dMag, L*nBeta*sizeof(double), cudaMemcpyDeviceToHost);
-    cudaMemcpy(hChi, dChi, L*nBeta*sizeof(double), cudaMemcpyDeviceToHost);
-    cudaMemcpy(hHeat, dHeat, L*nBeta*sizeof(double), cudaMemcpyDeviceToHost);
-    cudaMemcpy(hMagMarkov, dMagMarkov, L*nBeta*100000*sizeof(double), cudaMemcpyDeviceToHost);
-    cudaMemcpy(hEnergyMarkov, dEnergyMarkov, L*nBeta*100000*sizeof(double), cudaMemcpyDeviceToHost);
-    cudaMemcpy(hBeta, dBeta, nBeta*sizeof(double), cudaMemcpyDeviceToHost);
-
-    //output to file what we got in a TTree
-    TFile file("thermodynamics.root", "recreate");
-    TTree t1("t1","tree holding interesting quantities");
-    TTree t2("t2", "tree holding first 1e5 data points");
-    double currentChi, currentMag, currentHeat, currentMarkovMag, currentMarkovEnergy;
-
-    t1.Branch("mag", &currentMag, "mag/D");
-    t1.Branch("chi", &currentChi, "chi/D");
-    t1.Branch("heat", &currentHeat, "heat/D");
-    t2.Branch("magMarkov", &currentMarkovMag, "magMarkov/D");
-    t2.Branch("energyMarkov", &currentMarkovEnergy, "energyMarkov/D");
-
-    for(int i=0; i < L*nBeta*100000; i++)
-    {
-        if(i < L*nBeta)
+    //create two streams, one for copy the other for execution of kernel
+    cudaStream_t copyStream, executeStream;
+    cudaStreamCreate(&copyStream);
+    cudaStreamCreate(&executeStream);
+//
+    /***************************** SIMULATION RUN *************************************/
+    //run the kernel using one memory, while copying data to disk on the other memory
+    for(int i=0; i<dataPoints/batchSize;i++){
+        if(i!=0)
         {
-            currentMag = hMag[i];
-            currentChi = hChi[i];
-            currentHeat = hHeat[i];
-            t1.Fill();
+            cudaStreamWaitEvent(copyStream, kernelDone);
+            cudaMemcpyAsync(dMagMarkov[2], dMagMarkov[(i-1)%2], memSize*sizeof(signed char), cudaMemcpyDeviceToHost, copyStream);
+            cudaMemcpyAsync(dEnergyMarkov[2], dEnergyMarkov[(i-1)%2], memSize*sizeof(signed short), cudaMemcpyDeviceToHost, copyStream);
         }
-
-        currentMarkovEnergy = hEnergyMarkov[i];
-        currentMarkovMag = hMagMarkov[i];
-        t2.Fill();
+        simulation<<<L,nBeta, 0, executeStream>>>(batchSize, dBeta, dMagMarkov[i%2], dEnergyMarkov[i%2], dLattices, dStates);
+        cudaEventRecord(kernelDone, executeStream);
+        if(i!=0)
+        {
+            cudaStreamSynchronize(copyStream);
+            copyToDisk(i-1, batchSize, memSize, dMagMarkov[2], dEnergyMarkov[2]);
+        }
     }
-    t1.Write();
-    t2.Write();
+    //last copy
+    cudaStreamWaitEvent(copyStream, kernelDone);
+    cudaMemcpyAsync(dMagMarkov[2], dMagMarkov[(dataPoints/batchSize -1)%2], memSize*sizeof(signed char), cudaMemcpyDeviceToHost, copyStream);
+    cudaMemcpyAsync(dEnergyMarkov[2], dEnergyMarkov[(dataPoints/batchSize -1)%2], memSize*sizeof(signed short), cudaMemcpyDeviceToHost, copyStream);
+    cudaStreamSynchronize(copyStream);
+    copyToDisk(dataPoints/batchSize-1, batchSize, memSize, dMagMarkov[2], dEnergyMarkov[2]);
+    cudaDeviceSynchronize();
+
+    /********************************* CLEAN UP ****************************************/
+    //destroy streams
+    cudaStreamDestroy(copyStream);
+    cudaStreamDestroy(executeStream);
 
     //free device memory
     cudaFree(dStates);
-    cudaFree(dMag);
-    cudaFree(dChi);
-    cudaFree(dHeat);
     cudaFree(dBeta);
+    for(int i=0;i<3;i++)
+    {
+        cudaFree(dMagMarkov[i]);
+        cudaFree(dEnergyMarkov[i]);
+    }
     cudaFree(dMagMarkov);
     cudaFree(dEnergyMarkov);
+    cudaFree(dLattices);
 
-    //free host memory
-    free(hMag);
-    free(hChi);
-    free(hHeat);
-    free(hBeta);
-    free(hMagMarkov);
-    free(hEnergyMarkov);
 
     return 0;
 }
