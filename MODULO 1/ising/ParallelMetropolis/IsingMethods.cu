@@ -4,18 +4,18 @@
 /********* COPY TO DISK FUNCTION *************
 /********************************************/
 
-__host__ void copyToDisk(int i, int batchSize, int memSize, signed char* dMagMarkov, signed short* dEnergyMarkov)
+__host__ void copyToDisk(int i, int batchSize, int memSize, signed short* dMagMarkov, signed short* dEnergyMarkov)
 {
-    std::string fileName = "batch" + std::to_string(i) + ".root";
+    std::string fileName = "/media/mario/Volume/IsingSimData/batch" + std::to_string(i) + ".root";
     TFile file = TFile(fileName.c_str(), "recreate");
     TTree tree = TTree("data", "markov step data");
 
-    signed char currentMag;
+    signed short currentMag;
     signed short currentEnergy;
     unsigned short simIdx;
 
     tree.Branch("simIdx", &simIdx, "simIdx/s");
-    tree.Branch("magMarkov", &currentMag, "magMarkov/B");
+    tree.Branch("magMarkov", &currentMag, "magMarkov/S");
     tree.Branch("energyMarkov", &currentEnergy, "energyMarkov/S");
 
     for(int n=0; n<memSize;n++)
@@ -34,15 +34,26 @@ __host__ void copyToDisk(int i, int batchSize, int memSize, signed char* dMagMar
 /********* SIMULATION KERNEL *****************
 /********************************************/
 
-__global__ void simulation(int batchSize, double *dBeta, signed char* dMagMarkov, signed short* dEnergyMarkov, bool* dLattices, curandState* dStates)
+__global__ void simulation(int batchNum, int batchSize, double *dBeta, signed short* dMagMarkov, signed short* dEnergyMarkov, signed short* dMagCumulant, signed short* dEnergyCumulant, bool* dLattices, curandState* dStates)
 {
     //get thread index
     unsigned short idx = threadIdx.x + blockIdx.x*blockDim.x;
 
-    //get simulation parameters and random generator from the thread index
+    //get simulation parameters and random generator from the thread and block index
     double beta = 0.44 + 0.1*pow(2*(double)threadIdx.x/blockDim.x - 1,3);
     unsigned char L = 20 + blockIdx.x*10;
+
+    //initialize inter-batch arrays if this is the first run
+    if(batchNum == 0)
+    {
+            dMagCumulant[idx] += L*L;
+            dEnergyCumulant[idx] = -2*L*L;
+    }
+
+    //get values from inter-batch arrays
     curandState localState = dStates[idx];
+    signed short dMag = dMagCumulant[idx];
+    signed short dEnergy = dEnergyCumulant[idx];
 
     //make a copy from global memory of the local lattice
     int latticeIdx=0;
@@ -56,8 +67,6 @@ __global__ void simulation(int batchSize, double *dBeta, signed char* dMagMarkov
     int i0, j0;
     float acceptance;
     signed char force;
-    signed char dMag = 0;
-    signed short dEnergy = 0;
 
     //run metropolis algorithm
     for(unsigned long long i=0; i<100*batchSize; i++)
@@ -83,13 +92,13 @@ __global__ void simulation(int batchSize, double *dBeta, signed char* dMagMarkov
         {
             dMagMarkov[idx*batchSize + i/100] = dMag;
             dEnergyMarkov[idx*batchSize + i/100] = dEnergy;
-            dMag = 0;
-            dEnergy = 0;
         }
     }
 
-    //copy back current state of the random generator
+    //copy back current state of the random generator and inter-batch arrays
     dStates[idx] = localState;
+    dMagCumulant[idx] = dMag;
+    dEnergyCumulant[idx] = dEnergy;
 
     if(blockIdx.x==0)
         dBeta[threadIdx.x] = beta;

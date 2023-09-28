@@ -59,7 +59,7 @@ __device__ void randomLatticeSite(curandState *states, int *i0, int *j0);
 /********************************************/
 
 //function to copy to the disk
-__host__ void copyToDisk(int i, int batchSize, int memSize, signed char* dMagMarkov, signed short* dEnergyMarkov);
+__host__ void copyToDisk(int i, int batchSize, int memSize, signed short* dMagMarkov, signed short* dEnergyMarkov);
 
 
 
@@ -68,6 +68,6 @@ __host__ void copyToDisk(int i, int batchSize, int memSize, signed char* dMagMar
 /********************************************/
 
 //simulation kernel, implementing single step Metropolis algorithm
-__global__ void simulation(int batchSize, double *dBeta, signed char* dMagMarkov, signed short* dEnergyMarkov, bool* dLattices, curandState* dStates);
+__global__ void simulation(int batchNum, int batchSize, double *dBeta, signed short* dMagMarkov, signed short* dEnergyMarkov, signed short* dMagCumulant, signed short* dEnergyCumulant, bool* dLattices, curandState* dStates);
 
 #endif
