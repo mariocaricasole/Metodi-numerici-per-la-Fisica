@@ -6,7 +6,7 @@
 
 __host__ void copyToDisk(int i, int batchSize, int memSize, signed short* dMagMarkov, signed short* dEnergyMarkov)
 {
-    std::string fileName = "/media/mario/Volume/IsingSimData/batch" + std::to_string(i) + ".root";
+    std::string fileName = "batch" + std::to_string(i) + ".root";
     TFile file = TFile(fileName.c_str(), "recreate");
     TTree tree = TTree("data", "markov step data");
 
@@ -46,7 +46,7 @@ __global__ void simulation(int batchNum, int batchSize, double *dBeta, signed sh
     //initialize inter-batch arrays if this is the first run
     if(batchNum == 0)
     {
-            dMagCumulant[idx] += L*L;
+            dMagCumulant[idx] = L*L;
             dEnergyCumulant[idx] = -2*L*L;
     }
 
@@ -58,7 +58,7 @@ __global__ void simulation(int batchNum, int batchSize, double *dBeta, signed sh
     //make a copy from global memory of the local lattice
     int latticeIdx=0;
     for(unsigned char i=0; i<blockIdx.x; i++)
-        latticeIdx += pow((20+i*blockDim.x),2)*64;
+        latticeIdx += pow((20+i*10),2)*blockDim.x;
 
     latticeIdx += L*L*threadIdx.x;
     bool* localLattice = &dLattices[latticeIdx];
@@ -83,7 +83,7 @@ __global__ void simulation(int batchNum, int batchSize, double *dBeta, signed sh
         if(acceptance > curand_uniform(&localState))
         {
             dEnergy += get(localLattice,i0,j0,L)*force;
-            dMag -= get(localLattice,i0,j0,L);
+            dMag -= 2*get(localLattice,i0,j0,L);
             localLattice[flatten(i0,j0,L)] = !localLattice[flatten(i0,j0,L)];
         }
 
