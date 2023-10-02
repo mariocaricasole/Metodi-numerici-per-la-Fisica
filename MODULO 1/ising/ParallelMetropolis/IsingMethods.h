@@ -23,7 +23,6 @@ inline void gpuAssert(cudaError_t code, const char *file, int line, bool abort=t
 }
 
 
-
 /*********************************************
 /********** LATTICE FUNCTIONS ****************
 /********************************************/
@@ -40,7 +39,6 @@ __device__ constexpr signed char convert(bool value);
 __device__ signed char get(bool* lattice, int i, int j, int L);
 
 
-
 /*********************************************
 /******* RANDOM GENERATOR FUNCTIONS **********
 /********************************************/
@@ -53,14 +51,12 @@ __global__ void initRandom(curandState *states, int seed);
 __device__ void randomLatticeSite(curandState *states, int *i0, int *j0);
 
 
-
 /*********************************************
 /********* COPY TO DISK FUNCTION *************
 /********************************************/
 
 //function to copy to the disk
-__host__ void copyToDisk(int i, int batchSize, int memSize, signed short* dMagMarkov, signed short* dEnergyMarkov);
-
+__host__ void saveResults(int dataPoints, int nResamplings, int nBeta, int L, long long* dMagCumulant, long long* dEnergyCumulant);
 
 
 /*********************************************
@@ -68,6 +64,9 @@ __host__ void copyToDisk(int i, int batchSize, int memSize, signed short* dMagMa
 /********************************************/
 
 //simulation kernel, implementing single step Metropolis algorithm
-__global__ void simulation(int batchNum, int batchSize, double *dBeta, signed short* dMagMarkov, signed short* dEnergyMarkov, signed short* dMagCumulant, signed short* dEnergyCumulant, bool* dLattices, curandState* dStates);
+__global__ void simulation(int batchNum, int batchSize, double *dBeta, signed short* dMagMarkov, signed short* dEnergyMarkov, signed short* dMagCurrent, signed short* dEnergyCurrent, bool* dLattices, curandState* dStates);
+
+//bootstrapping the data by blocking technique
+__global__ void bootstrap(int nResamplings, int batchSize, int blockingSize, signed short* dMagMarkov, signed short* dEnergyMarkov, long long* dMagCumulant, long long* dEnergyCumulant, curandState* dStatesBS);
 
 #endif
