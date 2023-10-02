@@ -20,7 +20,7 @@ IsingLattice::IsingLattice(int L) : m_L(L)
     }
     
     //cold start
-    m_E = 1;
+    m_E = -2;
     m_M = 1;
 }
 
@@ -93,7 +93,7 @@ void IsingLattice::metropolisUpdate(float beta)
     if(acceptance > m_randProb(m_generator))
     {
         m_M = m_M - 2*m_array[i0][j0]/(m_L*m_L);
-        m_E = m_E - 2*force*m_array[i0][j0]/(m_L*m_L);
+        m_E = m_E + 2*force*m_array[i0][j0]/(m_L*m_L);
         m_array[i0][j0]*=-1;
     }
 
