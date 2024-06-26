@@ -65,33 +65,50 @@ __global__ void simulation(int batchNum, int batchSize, double *dBeta, signed sh
 
     //declare useful variables
     int i0, j0;
-    float acceptance;
-    signed char force;
+    signed char force, spin;
+
+    //pre-evaluate maps for the Boltzmann probabilitiess
+    float value2 = expf(-4*beta);
+    float value3 = expf(-8*beta);
+
+    int sweep = L*L;
 
     //run metropolis algorithm
-    for(unsigned long long i=0; i<100*batchSize; i++)
+    for(unsigned long int i=0; i<sweep*batchSize; i++)
     {
         //take a random site
         randomLatticeSite(&localState, &i0, &j0);
+
         //evaluate "force"
         force = get(localLattice,i0-1,j0,L)+ get(localLattice,i0+1,j0,L) + get(localLattice,i0,j0-1,L) + get(localLattice,i0,j0+1,L);
-
-        //calculate acceptance
-        acceptance = min(float(1.), expf(-2*get(localLattice,i0,j0,L)*force*beta));
+        spin = get(localLattice,i0,j0,L);
 
         //accept-reject step
-        if(acceptance > curand_uniform(&localState))
+        if(spin*force <= 0)
         {
-            dEnergy += get(localLattice,i0,j0,L)*force;
-            dMag -= 2*get(localLattice,i0,j0,L);
+            dEnergy += 2*spin*force;
+            dMag -= 2*spin;
+            localLattice[flatten(i0,j0,L)] = !localLattice[flatten(i0,j0,L)];
+        }
+        else if(spin*force == 2 && value2 > curand_uniform(&localState))
+        {
+            dEnergy += 2*spin*force;
+            dMag -= 2*spin;
+            localLattice[flatten(i0,j0,L)] = !localLattice[flatten(i0,j0,L)];
+        }
+        else if(spin*force == 4 && value3 > curand_uniform(&localState))
+        {
+            dEnergy += 2*spin*force;
+            dMag -= 2*spin;
             localLattice[flatten(i0,j0,L)] = !localLattice[flatten(i0,j0,L)];
         }
 
+
         //reduce data
-        if(i%100==0)
+        if(i%sweep==0)
         {
-            dMagMarkov[idx*batchSize + i/100] = dMag;
-            dEnergyMarkov[idx*batchSize + i/100] = dEnergy;
+            dMagMarkov[idx*batchSize + i/sweep] = dMag;
+            dEnergyMarkov[idx*batchSize + i/sweep] = dEnergy;
         }
     }
 
@@ -103,8 +120,6 @@ __global__ void simulation(int batchNum, int batchSize, double *dBeta, signed sh
     if(blockIdx.x==0)
         dBeta[threadIdx.x] = beta;
 }
-
-
 
 /*********************************************
 /********** LATTICE FUNCTIONS ****************
@@ -147,8 +162,6 @@ __device__ signed char get(bool* lattice, int i, int j, int L)
     return convert(value);
 }
 
-
-
 /*********************************************
 /******* RANDOM GENERATOR FUNCTIONS **********
 /********************************************/
@@ -168,8 +181,8 @@ __device__ void randomLatticeSite(curandState *states, int *i0, int *j0){
     unsigned char L = 20 + blockIdx.x*10;
     curandState localState = states[simIdx];
 
-    *i0 = (int)truncf(L*curand_uniform(&localState));
-    *j0 = (int)truncf(L*curand_uniform(&localState));
+    *i0 = (int)floor(L*curand_uniform(&localState));
+    *j0 = (int)floor(L*curand_uniform(&localState));
 
     states[simIdx] = localState;
 }

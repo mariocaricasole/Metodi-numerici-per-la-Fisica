@@ -6,10 +6,15 @@ int main()
     /************************ PARAMETERS ************************/
     //simulation parameters
     const unsigned char L = 4;
+    const unsigned char Larr[L] = {20, 30, 40, 50};
     const unsigned char nBeta = 64;
-    const int dataPoints = 4e5;
+    const int dataPoints = 1e7;
     const int batchSize = 1e5;
     const unsigned long long memSize = L*nBeta*batchSize;
+
+    unsigned short latticeElements = 0;
+    for(int i=0; i < L; i++)
+        latticeElements += Larr[i]*Larr[i];
 
     /******************* MEMORY ALLOCATIONS *********************/
     //allocate random generators
@@ -40,15 +45,15 @@ int main()
 
     //allocating array of betas and lattices memory for inter-batch use
     cudaMallocManaged(&dBeta, nBeta*sizeof(double));
-    cudaMallocManaged(&dLattices, 5400*nBeta*sizeof(bool));
+    cudaMallocManaged(&dLattices, latticeElements*nBeta*sizeof(bool));
 
     /*********************** INITIALIZATIONS ********************/
     //initialize all lattices to cold state
-    for(unsigned int i=0; i<5400*nBeta; i++)
+    for(unsigned int i=0; i<latticeElements*nBeta; i++)
         dLattices[i]=true;
 
     //run random generator initialization kernel
-    initRandom<<<L,nBeta>>>(dStates,1221);
+    initRandom<<<L,nBeta>>>(dStates,clock());
 
     //create event to signal end of kernel execution
     cudaEvent_t kernelDone;
@@ -78,16 +83,36 @@ int main()
             //synchronize CPU copy to the end of the asynchronous copy in order to start copy to disk
             cudaStreamSynchronize(copyStream);
             copyToDisk(i-1, batchSize, memSize, dMagMarkov[2], dEnergyMarkov[2]);
+            std::cout << "Batch " << i-1  << " completed"<< std::endl;
         }
     }
     //copy the last batch produced
     cudaStreamWaitEvent(copyStream, kernelDone);
-    cudaMemcpyAsync(dMagMarkov[2], dMagMarkov[(dataPoints/batchSize -1)%2], memSize*sizeof(signed short), cudaMemcpyDeviceToHost, copyStream);
+    cudaMemcpyAsync(dMagMarkov[2], dMagMarkov[(dataPoints/batchSize - 1)%2], memSize*sizeof(signed short), cudaMemcpyDeviceToHost, copyStream);
     cudaMemcpyAsync(dEnergyMarkov[2], dEnergyMarkov[(dataPoints/batchSize -1)%2], memSize*sizeof(signed short), cudaMemcpyDeviceToHost, copyStream);
+    gpuErrchk( cudaPeekAtLastError() );
     cudaStreamSynchronize(copyStream);
     copyToDisk(dataPoints/batchSize-1, batchSize, memSize, dMagMarkov[2], dEnergyMarkov[2]);
     //synchronize devices
     cudaDeviceSynchronize();
+
+    //save the vector containing beta
+//     std::string fileName = "beta.root";
+//     TFile file = TFile(fileName.c_str(), "recreate");
+//     TTree tree = TTree("data", "beta");
+//
+//     double beta;
+//     tree.Branch("beta", &beta, "beta/D");
+//
+//     for(int i=0; i<nBeta; i++){
+//         beta = dBeta[i];
+//         tree.Fill();
+//     }
+//
+//     tree.Write();
+//     file.Close();
+//
+//     cudaDeviceSynchronize();
 
     /********************************* CLEAN UP ****************************************/
     //destroy streams
@@ -97,17 +122,19 @@ int main()
     //free device memory
     cudaFree(dStates);
     cudaFree(dBeta);
-    for(int i=0;i<3;i++)
+    for(int i=0;i<2;i++)
     {
         cudaFree(dMagMarkov[i]);
         cudaFree(dEnergyMarkov[i]);
     }
-    cudaFree(dMagMarkov);
-    cudaFree(dEnergyMarkov);
-    cudaFree(dMagCumulant);
-    cudaFree(dEnergyCumulant);
-    cudaFree(dLattices);
 
+    cudaFreeHost(dMagMarkov[2]);
+    cudaFreeHost(dEnergyMarkov[2]);
+    cudaFreeHost(dMagMarkov);
+    cudaFreeHost(dEnergyMarkov);
+    cudaFreeHost(dMagCumulant);
+    cudaFreeHost(dEnergyCumulant);
+    cudaFree(dLattices);
 
     return 0;
 }
